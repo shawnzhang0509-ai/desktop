@@ -124,6 +124,34 @@ def get_desktop_path() -> Path:
     return home / "Desktop"
 
 
+def safe_move_file(src: Path, dest: Path) -> None:
+    """移动文件，兼容跨盘（C盘桌面 -> D盘归档）及文件被占用的情况。"""
+    src = Path(src)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if src.resolve().drive.lower() == dest.resolve().drive.lower():
+        shutil.move(str(src), str(dest))
+        return
+
+    shutil.copy2(src, dest)
+    if not dest.exists():
+        raise OSError(f"复制失败: {src} -> {dest}")
+
+    try:
+        src.unlink()
+    except PermissionError as exc:
+        raise PermissionError(
+            f"文件已复制到:\n{dest}\n\n"
+            f"但无法删除桌面原文件（可能正在被播放器/网盘占用）:\n{src}\n\n"
+            f"请关闭相关程序后手动删除原文件。"
+        ) from exc
+    except OSError as exc:
+        raise OSError(
+            f"文件已复制到 {dest}，但删除原文件失败: {exc}"
+        ) from exc
+
+
 class BatchNoteDialog(QDialog):
     def __init__(self, parent=None, folder_name="", default_note=""):
         super().__init__(parent)
@@ -841,6 +869,7 @@ class DesktopOrganizer(QMainWindow):
         # 执行整理
         undo_log = []
         moved = 0
+        failed_moves: list[tuple[str, str]] = []
         
         for target_path, files in groups.items():
             date_str = self.get_date_str()
@@ -895,14 +924,19 @@ class DesktopOrganizer(QMainWindow):
                 if dest.exists():
                     stem, suffix = item.stem, item.suffix
                     dest = target_path / f"{stem}_{datetime.now():%H%M%S}{suffix}"
-                
+
+                try:
+                    safe_move_file(item, dest)
+                except Exception as exc:
+                    failed_moves.append((name, str(exc)))
+                    continue
+
                 undo_log.append({
                     "from": str(item),
                     "to": str(dest),
                     "name": name,
                     "batch": str(target_path)
                 })
-                shutil.move(str(item), str(dest))
                 moved += 1
             
             if open_folder:
@@ -918,6 +952,13 @@ class DesktopOrganizer(QMainWindow):
         self.refresh_file_list()
         
         msg = f"整理完成！\n\n移动: {moved} 个文件\n批次: {len(groups)} 个\n\n⚪ 未标记的文件保持不动"
+        if failed_moves:
+            msg += f"\n\n⚠️ 失败 {len(failed_moves)} 个:"
+            for name, err in failed_moves[:5]:
+                short_err = err.split("\n")[0]
+                msg += f"\n• {name}: {short_err}"
+            if len(failed_moves) > 5:
+                msg += f"\n• ... 还有 {len(failed_moves) - 5} 个"
         if undo_log:
             msg += "\n\n💾 已保存撤回记录"
         QMessageBox.information(self, "完成", msg)
@@ -945,9 +986,9 @@ class DesktopOrganizer(QMainWindow):
                 dest = dest.parent / f"{stem}_撤回{datetime.now():%H%M%S}{suffix}"
             
             try:
-                shutil.move(str(src), str(dest))
+                safe_move_file(src, dest)
                 restored += 1
-            except Exception as e:
+            except Exception:
                 failed += 1
         
         # 清理空批次文件夹
