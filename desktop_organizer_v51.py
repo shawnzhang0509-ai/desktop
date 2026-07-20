@@ -8,17 +8,64 @@ import sys
 import json
 import shutil
 import re
+import traceback
 from pathlib import Path
 from datetime import datetime
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-    QMessageBox, QSplitter, QFrame, QDialog, QDialogButtonBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QMenu, QFileDialog, QTextEdit, QComboBox, QCheckBox
-)
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QColor
+
+
+def get_app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def log_error(message: str) -> Path | None:
+    try:
+        log_file = get_app_dir() / "启动错误.log"
+        log_file.write_text(message, encoding="utf-8")
+        return log_file
+    except Exception:
+        return None
+
+
+def show_fatal_error(message: str) -> None:
+    log_path = log_error(message)
+    if log_path:
+        message += f"\n\n（错误已写入: {log_path}）"
+    print(message, file=sys.stderr)
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, message, "桌面整理器 - 启动错误", 0x10)
+    except Exception:
+        pass
+
+
+def pause_before_exit() -> None:
+    try:
+        input("\n按回车键退出...")
+    except Exception:
+        pass
+
+
+try:
+    from PyQt6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
+        QMessageBox, QSplitter, QFrame, QDialog, QDialogButtonBox,
+        QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+        QMenu, QFileDialog, QTextEdit, QComboBox, QCheckBox
+    )
+    from PyQt6.QtCore import Qt, QSize
+    from PyQt6.QtGui import QFont, QColor
+except ImportError as exc:
+    show_fatal_error(
+        "缺少 PyQt6，无法启动界面。\n\n"
+        "请在命令行执行：\n"
+        "pip install PyQt6\n\n"
+        f"详细错误: {exc}"
+    )
+    pause_before_exit()
+    sys.exit(1)
 
 
 def get_desktop_path() -> Path:
@@ -975,23 +1022,46 @@ class DesktopOrganizer(QMainWindow):
             print(f"加载配置失败: {e}")
 
 
+def check_runtime() -> None:
+    if getattr(sys, "frozen", False):
+        import multiprocessing
+        multiprocessing.freeze_support()
+
+        internal_dir = get_app_dir() / "_internal"
+        if not internal_dir.is_dir():
+            show_fatal_error(
+                "程序文件不完整，启动后立即退出通常是因为这个。\n\n"
+                "请不要只复制 exe 到桌面。\n"
+                "必须保留整个文件夹：\n"
+                "  desktop_organizer_v51\\\n"
+                "    desktop_organizer_v51.exe\n"
+                "    _internal\\\n\n"
+                f"当前 exe 位置:\n{get_app_dir()}"
+            )
+            pause_before_exit()
+            sys.exit(1)
+
+
 def main():
+    check_runtime()
+
     app = QApplication(sys.argv)
     font = QFont("Microsoft YaHei", 10)
     app.setFont(font)
-    
+
     try:
         window = DesktopOrganizer()
         window.show()
         sys.exit(app.exec())
-    except Exception as e:
-        import traceback
-        error_msg = f"启动失败:\n{str(e)}\n\n{traceback.format_exc()}"
-        print(error_msg)
+    except Exception as exc:
+        error_msg = f"启动失败:\n{exc}\n\n{traceback.format_exc()}"
+        log_error(error_msg)
+        print(error_msg, file=sys.stderr)
         try:
             QMessageBox.critical(None, "启动错误", error_msg)
-        except:
-            pass
+        except Exception:
+            show_fatal_error(error_msg)
+        pause_before_exit()
         sys.exit(1)
 
 
