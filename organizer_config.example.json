@@ -1,0 +1,10 @@
+{
+  "rules": {
+    "MMP-": ["MassageMap", "D:\\副业\\MMP", true],
+    "CW-": ["财务", "D:\\归档\\工作\\财务", true],
+    "IT-": "D:\\归档\\工作\\IT"
+  },
+  "skip_prefixes": ["TG-"],
+  "date_format": "YYYY-MM-DD",
+  "desktop_path": "C:\\Users\\zhang\\Desktop"
+}
