@@ -21,6 +21,39 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QColor
 
 
+def get_desktop_path() -> Path:
+    """获取真实桌面路径（兼容中文系统、OneDrive 重定向）。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            CSIDL_DESKTOPDIRECTORY = 0x0010
+            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+            if ctypes.windll.shell32.SHGetFolderPathW(
+                None, CSIDL_DESKTOPDIRECTORY, None, 0, buf
+            ) == 0:
+                path = Path(buf.value)
+                if path.exists():
+                    return path
+        except Exception:
+            pass
+
+    home = Path.home()
+    candidates = [
+        home / "Desktop",
+        home / "桌面",
+        home / "OneDrive" / "Desktop",
+        home / "OneDrive" / "桌面",
+        home / "OneDrive - Personal" / "Desktop",
+        home / "OneDrive - Personal" / "桌面",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return home / "Desktop"
+
+
 class BatchNoteDialog(QDialog):
     def __init__(self, parent=None, folder_name="", default_note=""):
         super().__init__(parent)
@@ -149,7 +182,7 @@ class RuleEditorDialog(QDialog):
 class DesktopOrganizer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.desktop = Path.home() / "Desktop"
+        self.desktop = get_desktop_path()
         self.config_file = self.desktop / ".organizer_config.json"
         self.undo_file = self.desktop / ".organizer_undo.json"
         
@@ -288,6 +321,10 @@ class DesktopOrganizer(QMainWindow):
         self.btn_refresh = QPushButton("🔄 刷新")
         self.btn_refresh.clicked.connect(self.refresh_file_list)
         nav_layout.addWidget(self.btn_refresh)
+
+        self.btn_change_dir = QPushButton("📂 更改目录")
+        self.btn_change_dir.clicked.connect(self.change_organize_dir)
+        nav_layout.addWidget(self.btn_change_dir)
         
         right_layout.addLayout(nav_layout)
         
@@ -474,6 +511,22 @@ class DesktopOrganizer(QMainWindow):
         if parent.exists():
             self.current_path = parent
             self.refresh_file_list()
+
+    def change_organize_dir(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "选择要整理的目录", str(self.desktop)
+        )
+        if path:
+            self.desktop = Path(path)
+            self.config_file = self.desktop / ".organizer_config.json"
+            self.undo_file = self.desktop / ".organizer_undo.json"
+            self.current_path = self.desktop
+            self.path_label.setText(f"📁 {self.desktop}")
+            self.refresh_file_list()
+            QMessageBox.information(
+                self, "已切换",
+                f"整理目录已设为:\n{self.desktop}\n\n点击「默认(桌面)」可恢复规则路径。"
+            )
             
     def add_rule(self):
         dialog = RuleEditorDialog(self)
@@ -655,7 +708,8 @@ class DesktopOrganizer(QMainWindow):
                 "desktop_organizer.exe",
                 "desktop_organizer_v51.py",
                 "desktop_organizer_v6.py",
-                "desktop_organizer_v61.py"
+                "desktop_organizer_v61.py",
+                "desktop_organizer_v51.exe",
             }:
                 continue
             
@@ -681,7 +735,30 @@ class DesktopOrganizer(QMainWindow):
             # 未标记的文件直接跳过，不整理
         
         if not files_to_move:
-            QMessageBox.information(self, "提示", "没有需要整理的文件\n（未标记的文件不会被自动整理）")
+            try:
+                desktop_file_count = sum(
+                    1 for item in self.desktop.iterdir()
+                    if item.is_file() and not item.name.startswith(".")
+                )
+            except OSError:
+                desktop_file_count = -1
+
+            if desktop_file_count < 0:
+                count_hint = f"无法读取目录: {self.desktop}"
+            else:
+                count_hint = f"扫描目录: {self.desktop}\n桌面上共有 {desktop_file_count} 个文件"
+
+            hint = (
+                f"{count_hint}\n\n"
+                "可能原因：\n"
+                "1. 文件名需以规则前缀开头（如 CW-、IT-）\n"
+                "2. 文件是快捷方式(.lnk)或已标记跳过\n"
+                "3. 桌面路径不对（可点右侧「更改目录」修正）"
+            )
+            QMessageBox.information(
+                self, "提示",
+                f"没有需要整理的文件\n（未标记的文件不会被自动整理）\n\n{hint}"
+            )
             return
         
         # 按目标路径分组
@@ -827,7 +904,8 @@ class DesktopOrganizer(QMainWindow):
         config = {
             "rules": self.rules,
             "skip_prefixes": list(self.skip_prefixes),
-            "date_format": self.date_format
+            "date_format": self.date_format,
+            "desktop_path": str(self.desktop),
         }
         
         with open(self.config_file, "w", encoding="utf-8") as f:
@@ -836,11 +914,22 @@ class DesktopOrganizer(QMainWindow):
         QMessageBox.information(self, "保存成功", f"规则已保存\n共 {len(self.rules)} 条规则")
         
     def load_config(self):
-        if not self.config_file.exists():
+        config_paths = [self.config_file]
+        for candidate in (
+            Path.home() / "Desktop" / ".organizer_config.json",
+            Path.home() / "桌面" / ".organizer_config.json",
+            Path.home() / "OneDrive" / "桌面" / ".organizer_config.json",
+            Path.home() / "OneDrive" / "Desktop" / ".organizer_config.json",
+        ):
+            if candidate not in config_paths:
+                config_paths.append(candidate)
+
+        config_file = next((p for p in config_paths if p.exists()), None)
+        if not config_file:
             return
-        
+
         try:
-            with open(self.config_file, "r", encoding="utf-8") as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
             
             raw_rules = config.get("rules", {})
@@ -857,6 +946,19 @@ class DesktopOrganizer(QMainWindow):
             
             self.skip_prefixes = set(config.get("skip_prefixes", []))
             self.date_format = config.get("date_format", "YYYY-MM-DD")
+
+            saved_desktop = config.get("desktop_path")
+            if saved_desktop:
+                saved_path = Path(saved_desktop)
+                if saved_path.exists():
+                    self.desktop = saved_path
+                    self.config_file = self.desktop / ".organizer_config.json"
+                    self.undo_file = self.desktop / ".organizer_undo.json"
+                    self.current_path = self.desktop
+
+            if config_file != self.config_file:
+                self.config_file = config_file
+                self.undo_file = config_file.parent / ".organizer_undo.json"
             
             if hasattr(self, 'date_format_combo'):
                 if self.date_format == "YYYY-MM":
