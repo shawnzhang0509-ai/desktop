@@ -124,6 +124,104 @@ def get_desktop_path() -> Path:
     return home / "Desktop"
 
 
+D_ARCHIVE_BASE = "D:\\归档"
+
+
+def build_d_drive_rules(d_base: str = D_ARCHIVE_BASE) -> dict:
+    return {
+        "CW-":    ("财务", f"{d_base}\\工作\\财务", True),
+        "FGW-":   ("发改委", f"{d_base}\\工作\\发改委", True),
+        "IT-":    ("IT", f"{d_base}\\工作\\IT", True),
+        "GZ-":    ("其他", f"{d_base}\\工作\\其他", True),
+        "ZGGYL-": ("中国供应链", f"{d_base}\\副业\\中国供应链", True),
+        "FW-":    ("本地服务", f"{d_base}\\副业\\本地服务", True),
+        "MMP-":   ("MassageMap", f"{d_base}\\副业\\MassageMap", True),
+        "FY-":    ("其他", f"{d_base}\\副业\\其他", True),
+    }
+
+
+def build_desktop_subfolder_rules(desktop: Path) -> dict:
+    return {
+        "CW-":    ("财务", str(desktop / "工作" / "财务"), True),
+        "FGW-":   ("发改委", str(desktop / "工作" / "发改委"), True),
+        "IT-":    ("IT", str(desktop / "工作" / "IT"), True),
+        "GZ-":    ("其他", str(desktop / "工作" / "其他"), True),
+        "ZGGYL-": ("中国供应链", str(desktop / "副业" / "中国供应链"), True),
+        "FW-":    ("本地服务", str(desktop / "副业" / "本地服务"), True),
+        "MMP-":   ("MassageMap", str(desktop / "副业" / "MassageMap"), True),
+        "FY-":    ("其他", str(desktop / "副业" / "其他"), True),
+    }
+
+
+def is_absolute_path(text: str) -> bool:
+    if not text:
+        return False
+    if text.startswith("\\\\"):
+        return True
+    return len(text) >= 2 and text[1] == ":"
+
+
+def parse_rule_value(prefix: str, value, desktop: Path) -> tuple | None:
+    """解析 JSON 规则，兼容多种写法。"""
+    if isinstance(value, dict):
+        folder = value.get("folder") or prefix.rstrip("-")
+        path = value.get("path") or value.get("target") or value.get("目标路径")
+        if not path:
+            return None
+        use_date = value.get("date_subfolder", value.get("use_date", True))
+        return (str(folder), str(path), bool(use_date))
+
+    if isinstance(value, (list, tuple)):
+        if len(value) >= 3:
+            return (str(value[0]), str(value[1]), bool(value[2]))
+        if len(value) == 2:
+            return (str(value[0]), str(value[1]), True)
+        return None
+
+    if isinstance(value, str):
+        if is_absolute_path(value):
+            return (prefix.rstrip("-"), value, True)
+        return (value, str(desktop / value), True)
+
+    return None
+
+
+def safe_move_file(src: Path, dest: Path) -> None:
+    """移动文件，兼容跨盘（C盘桌面 -> D盘归档）及文件被占用的情况。"""
+    src = Path(src)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if src.resolve().drive.lower() == dest.resolve().drive.lower():
+        shutil.move(str(src), str(dest))
+        return
+
+    shutil.copy2(src, dest)
+    if not dest.exists():
+        raise OSError(f"复制失败: {src} -> {dest}")
+
+    try:
+        src.unlink()
+    except (PermissionError, OSError) as exc:
+        # 复制已成功，尽量把桌面原文件改名，避免看起来像「没移走」
+        try:
+            pending = src.parent / f"{src.name}.已归档待删"
+            if pending.exists():
+                pending = src.parent / f"{src.stem}_{datetime.now():%H%M%S}{src.suffix}.已归档待删"
+            src.rename(pending)
+            raise OSError(
+                f"文件已移动到:\n{dest}\n\n"
+                f"桌面原文件被占用，已改名为:\n{pending.name}\n"
+                f"请关闭占用程序后手动删除它。"
+            ) from exc
+        except OSError:
+            raise OSError(
+                f"文件已移动到:\n{dest}\n\n"
+                f"但无法删除桌面原文件（可能正在被占用）:\n{src}\n"
+                f"请关闭相关程序后手动删除。"
+            ) from exc
+
+
 class BatchNoteDialog(QDialog):
     def __init__(self, parent=None, folder_name="", default_note=""):
         super().__init__(parent)
@@ -256,16 +354,7 @@ class DesktopOrganizer(QMainWindow):
         self.config_file = self.desktop / ".organizer_config.json"
         self.undo_file = self.desktop / ".organizer_undo.json"
         
-        self.rules = {
-            "CW-":    ("财务", str(self.desktop / "工作" / "财务"), True),
-            "FGW-":   ("发改委", str(self.desktop / "工作" / "发改委"), True),
-            "IT-":    ("IT", str(self.desktop / "工作" / "IT"), True),
-            "GZ-":    ("其他", str(self.desktop / "工作" / "其他"), True),
-            "ZGGYL-": ("中国供应链", str(self.desktop / "副业" / "中国供应链"), True),
-            "FW-":    ("本地服务", str(self.desktop / "副业" / "本地服务"), True),
-            "MMP-":   ("MassageMap", str(self.desktop / "副业" / "MassageMap"), True),
-            "FY-":    ("其他", str(self.desktop / "副业" / "其他"), True),
-        }
+        self.rules = build_d_drive_rules()
         self.skip_prefixes = {"TG-"}
         self.date_format = "YYYY-MM-DD"
         self.system_folders = {"工作", "副业", "未标记", "快捷方式"}
@@ -320,9 +409,11 @@ class DesktopOrganizer(QMainWindow):
         left_layout.addLayout(rule_btn_layout)
         
         preset_layout = QHBoxLayout()
-        self.btn_desktop = QPushButton("默认(桌面)")
+        self.btn_desktop = QPushButton("桌面子文件夹")
+        self.btn_desktop.setToolTip("文件仍在桌面上，只是放进桌面的「工作/副业」文件夹")
         self.btn_desktop.clicked.connect(self.set_default_paths)
-        self.btn_d_drive = QPushButton("D盘归档")
+        self.btn_d_drive = QPushButton("D盘归档(推荐)")
+        self.btn_d_drive.setToolTip("把文件移出桌面，归档到 D:\\归档\\")
         self.btn_d_drive.clicked.connect(self.set_d_drive_paths)
         preset_layout.addWidget(self.btn_desktop)
         preset_layout.addWidget(self.btn_d_drive)
@@ -405,7 +496,7 @@ class DesktopOrganizer(QMainWindow):
         self.file_list.customContextMenuRequested.connect(self.show_file_menu)
         right_layout.addWidget(self.file_list)
         
-        self.info_label = QLabel("双击文件夹进入 | 右键文件操作 | ⚪ 未标记文件不会自动整理")
+        self.info_label = QLabel("整理 = 从桌面移走文件 | 带前缀的才会动 | ⚪ 未标记不动")
         self.info_label.setStyleSheet("color: gray; padding: 5px;")
         right_layout.addWidget(self.info_label)
         
@@ -429,15 +520,24 @@ class DesktopOrganizer(QMainWindow):
         
     def refresh_rules_table(self):
         self.rule_table.setRowCount(len(self.rules))
+        desktop_root = str(self.desktop.resolve())
         for i, (prefix, (folder, path, use_date)) in enumerate(self.rules.items()):
             self.rule_table.setItem(i, 0, QTableWidgetItem(prefix))
             self.rule_table.setItem(i, 1, QTableWidgetItem(folder))
-            
+
+            on_desktop = str(Path(path).resolve()).startswith(desktop_root)
             display_path = path
             if len(path) > 35:
                 display_path = path[:12] + "..." + path[-18:]
+            if on_desktop:
+                display_path = "⚠️仍在桌面 " + display_path
             path_item = QTableWidgetItem(display_path)
-            path_item.setToolTip(path)
+            path_item.setToolTip(
+                f"{path}\n\n"
+                + ("⚠️ 目标在桌面上，文件不会真正离开桌面！" if on_desktop else "✅ 文件会移出桌面")
+            )
+            if on_desktop:
+                path_item.setForeground(QColor(200, 100, 0))
             self.rule_table.setItem(i, 2, path_item)
             
             date_item = QTableWidgetItem("✓" if use_date else "✗")
@@ -644,35 +744,21 @@ class DesktopOrganizer(QMainWindow):
             self.refresh_rules_table()
             
     def set_default_paths(self):
-        reply = QMessageBox.question(self, "确认", "恢复默认桌面路径？")
+        reply = QMessageBox.question(
+            self, "确认",
+            "这会把文件整理到桌面的「工作/副业」子文件夹里，\n"
+            "文件仍在桌面上，不会真正清空桌面。\n\n"
+            "确定要这样设置吗？"
+        )
         if reply == QMessageBox.StandardButton.Yes:
-            self.rules = {
-                "CW-":    ("财务", str(self.desktop / "工作" / "财务"), True),
-                "FGW-":   ("发改委", str(self.desktop / "工作" / "发改委"), True),
-                "IT-":    ("IT", str(self.desktop / "工作" / "IT"), True),
-                "GZ-":    ("其他", str(self.desktop / "工作" / "其他"), True),
-                "ZGGYL-": ("中国供应链", str(self.desktop / "副业" / "中国供应链"), True),
-                "FW-":    ("本地服务", str(self.desktop / "副业" / "本地服务"), True),
-                "MMP-":   ("MassageMap", str(self.desktop / "副业" / "MassageMap"), True),
-                "FY-":    ("其他", str(self.desktop / "副业" / "其他"), True),
-            }
+            self.rules = build_desktop_subfolder_rules(self.desktop)
             self.refresh_rules_table()
             self.refresh_file_list()
-            
+
     def set_d_drive_paths(self):
-        reply = QMessageBox.question(self, "确认", "设置所有规则到 D:\\归档\\ ?")
+        reply = QMessageBox.question(self, "确认", "设置所有规则到 D:\\归档\\ ？\n（文件会移出桌面）")
         if reply == QMessageBox.StandardButton.Yes:
-            d_base = "D:\\归档"
-            self.rules = {
-                "CW-":    ("财务", f"{d_base}\\工作\\财务", True),
-                "FGW-":   ("发改委", f"{d_base}\\工作\\发改委", True),
-                "IT-":    ("IT", f"{d_base}\\工作\\IT", True),
-                "GZ-":    ("其他", f"{d_base}\\工作\\其他", True),
-                "ZGGYL-": ("中国供应链", f"{d_base}\\副业\\中国供应链", True),
-                "FW-":    ("本地服务", f"{d_base}\\副业\\本地服务", True),
-                "MMP-":   ("MassageMap", f"{d_base}\\副业\\MassageMap", True),
-                "FY-":    ("其他", f"{d_base}\\副业\\其他", True),
-            }
+            self.rules = build_d_drive_rules()
             self.refresh_rules_table()
             self.refresh_file_list()
             
@@ -841,6 +927,7 @@ class DesktopOrganizer(QMainWindow):
         # 执行整理
         undo_log = []
         moved = 0
+        failed_moves: list[tuple[str, str]] = []
         
         for target_path, files in groups.items():
             date_str = self.get_date_str()
@@ -895,14 +982,19 @@ class DesktopOrganizer(QMainWindow):
                 if dest.exists():
                     stem, suffix = item.stem, item.suffix
                     dest = target_path / f"{stem}_{datetime.now():%H%M%S}{suffix}"
-                
+
+                try:
+                    safe_move_file(item, dest)
+                except Exception as exc:
+                    failed_moves.append((name, str(exc)))
+                    continue
+
                 undo_log.append({
                     "from": str(item),
                     "to": str(dest),
                     "name": name,
                     "batch": str(target_path)
                 })
-                shutil.move(str(item), str(dest))
                 moved += 1
             
             if open_folder:
@@ -918,6 +1010,13 @@ class DesktopOrganizer(QMainWindow):
         self.refresh_file_list()
         
         msg = f"整理完成！\n\n移动: {moved} 个文件\n批次: {len(groups)} 个\n\n⚪ 未标记的文件保持不动"
+        if failed_moves:
+            msg += f"\n\n⚠️ 失败 {len(failed_moves)} 个:"
+            for name, err in failed_moves[:5]:
+                short_err = err.split("\n")[0]
+                msg += f"\n• {name}: {short_err}"
+            if len(failed_moves) > 5:
+                msg += f"\n• ... 还有 {len(failed_moves) - 5} 个"
         if undo_log:
             msg += "\n\n💾 已保存撤回记录"
         QMessageBox.information(self, "完成", msg)
@@ -945,9 +1044,9 @@ class DesktopOrganizer(QMainWindow):
                 dest = dest.parent / f"{stem}_撤回{datetime.now():%H%M%S}{suffix}"
             
             try:
-                shutil.move(str(src), str(dest))
+                safe_move_file(src, dest)
                 restored += 1
-            except Exception as e:
+            except Exception:
                 failed += 1
         
         # 清理空批次文件夹
@@ -972,7 +1071,10 @@ class DesktopOrganizer(QMainWindow):
         self.skip_prefixes = set(p.strip() for p in skip_text.split(",") if p.strip())
         
         config = {
-            "rules": self.rules,
+            "rules": {
+                prefix: [folder, path, use_date]
+                for prefix, (folder, path, use_date) in self.rules.items()
+            },
             "skip_prefixes": list(self.skip_prefixes),
             "date_format": self.date_format,
             "desktop_path": str(self.desktop),
@@ -1003,17 +1105,20 @@ class DesktopOrganizer(QMainWindow):
                 config = json.load(f)
             
             raw_rules = config.get("rules", {})
-            self.rules = {}
+            parsed_rules = {}
+            invalid_rules = []
             for prefix, value in raw_rules.items():
-                if isinstance(value, tuple) and len(value) == 3:
-                    self.rules[prefix] = value
-                elif isinstance(value, list) and len(value) == 3:
-                    self.rules[prefix] = tuple(value)
-                elif isinstance(value, (tuple, list)) and len(value) == 2:
-                    self.rules[prefix] = (value[0], value[1], True)
-                elif isinstance(value, str):
-                    self.rules[prefix] = (value, str(self.desktop / value), True)
-            
+                parsed = parse_rule_value(prefix, value, self.desktop)
+                if parsed:
+                    parsed_rules[prefix] = parsed
+                else:
+                    invalid_rules.append(prefix)
+
+            if parsed_rules:
+                self.rules = parsed_rules
+            elif raw_rules:
+                invalid_rules.append("(所有规则格式均无效，已保留当前规则)")
+
             self.skip_prefixes = set(config.get("skip_prefixes", []))
             self.date_format = config.get("date_format", "YYYY-MM-DD")
 
@@ -1029,19 +1134,30 @@ class DesktopOrganizer(QMainWindow):
             if config_file != self.config_file:
                 self.config_file = config_file
                 self.undo_file = config_file.parent / ".organizer_undo.json"
-            
+
             if hasattr(self, 'date_format_combo'):
                 if self.date_format == "YYYY-MM":
                     self.date_format_combo.setCurrentIndex(1)
                 else:
                     self.date_format_combo.setCurrentIndex(0)
-            
+
             if hasattr(self, 'skip_input'):
                 self.skip_input.setText(", ".join(self.skip_prefixes))
-            
+
             self.refresh_rules_table()
-            
+
+            if invalid_rules:
+                QMessageBox.warning(
+                    self, "配置有误",
+                    "以下规则无法识别，已跳过：\n"
+                    + "\n".join(f"• {p}" for p in invalid_rules)
+                    + "\n\n正确格式示例：\n"
+                    '"MMP-": ["MassageMap", "D:\\\\副业\\\\MMP", true]\n'
+                    '或 "MMP-": "D:\\\\副业\\\\MMP"'
+                )
+
         except Exception as e:
+            QMessageBox.warning(self, "加载配置失败", f"无法读取配置文件:\n{e}\n\n将使用当前规则。")
             print(f"加载配置失败: {e}")
 
 
