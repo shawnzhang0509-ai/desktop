@@ -5,24 +5,44 @@
 """
 
 import sys
+from pathlib import Path
+
+_APP_DIR = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent
+)
+
+
+def _trace(msg: str) -> None:
+    try:
+        with open(_APP_DIR / "启动错误.log", "a", encoding="utf-8") as f:
+            from datetime import datetime
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+    except Exception:
+        pass
+
+
+_trace(f"进程启动 | Python {sys.version} | frozen={getattr(sys, 'frozen', False)}")
+
 import json
 import shutil
 import re
 import traceback
-from pathlib import Path
 from datetime import datetime
 
 
 def get_app_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+    return _APP_DIR
 
 
 def log_error(message: str) -> Path | None:
     try:
         log_file = get_app_dir() / "启动错误.log"
-        log_file.write_text(message, encoding="utf-8")
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(message)
+            if not message.endswith("\n"):
+                f.write("\n")
         return log_file
     except Exception:
         return None
@@ -48,6 +68,7 @@ def pause_before_exit() -> None:
 
 
 try:
+    _trace("正在导入 PyQt6...")
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
@@ -57,7 +78,9 @@ try:
     )
     from PyQt6.QtCore import Qt, QSize
     from PyQt6.QtGui import QFont, QColor
+    _trace("PyQt6 导入成功")
 except ImportError as exc:
+    _trace(f"PyQt6 导入失败: {exc}")
     show_fatal_error(
         "缺少 PyQt6，无法启动界面。\n\n"
         "请在命令行执行：\n"
@@ -1043,17 +1066,22 @@ def check_runtime() -> None:
 
 
 def main():
+    _trace("进入 main()")
     check_runtime()
 
     app = QApplication(sys.argv)
+    _trace("QApplication 已创建")
     font = QFont("Microsoft YaHei", 10)
     app.setFont(font)
 
     try:
+        _trace("正在创建主窗口...")
         window = DesktopOrganizer()
+        _trace("主窗口创建成功，显示界面")
         window.show()
         sys.exit(app.exec())
     except Exception as exc:
+        _trace(f"启动异常: {exc}")
         error_msg = f"启动失败:\n{exc}\n\n{traceback.format_exc()}"
         log_error(error_msg)
         print(error_msg, file=sys.stderr)
